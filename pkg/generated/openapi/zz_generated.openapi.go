@@ -52955,6 +52955,22 @@ func schema_k8sio_kubelet_config_v1beta1_KubeletConfiguration(ref common.Referen
 							Format:      "",
 						},
 					},
+					"qosResourceManagerResourceNamesMap": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Map of resource name \"A\" to resource name \"B\" during QoS Resource Manager allocation period. It's useful for the same kind resource with different types. (eg. maps best-effort-cpu to cpu) Default: nil",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
 					"qosReserved": {
 						SchemaProps: spec.SchemaProps{
 							Description: "qosReserved is a set of resource name to percentage pairs that specify the minimum percentage of a resource reserved for exclusive use by the guaranteed QoS tier. Currently supported resources: \"memory\" Requires the QOSReserved feature gate to be enabled. Default: nil",
@@ -53460,7 +53476,7 @@ func schema_k8sio_kubelet_config_v1beta1_KubeletConfiguration(ref common.Referen
 					},
 					"hostPortRange": {
 						SchemaProps: spec.SchemaProps{
-							Description: "HostPortRange specifies the port range reserved for port assignment of autoport pod.",
+							Description: "HostPortRange specifies the port range reserved for port assignment of autoport pod. Default: 9200-9500",
 							Default:     map[string]interface{}{},
 							Ref:         ref("k8s.io/apimachinery/pkg/util/net.PortRange"),
 						},

@@ -412,8 +412,8 @@ func autoConvert_v1beta1_KubeletConfiguration_To_config_KubeletConfiguration(in 
 	out.MemoryManagerPolicy = in.MemoryManagerPolicy
 	out.TopologyManagerPolicy = in.TopologyManagerPolicy
 	out.QoSResourceManagerReconcilePeriod = in.QoSResourceManagerReconcilePeriod
-	out.QoSResourceManagerResourceNamesMap = *(*map[string]string)(unsafe.Pointer(&in.QoSResourceManagerResourceNamesMap))
 	out.TopologyManagerScope = in.TopologyManagerScope
+	out.QoSResourceManagerResourceNamesMap = *(*map[string]string)(unsafe.Pointer(&in.QoSResourceManagerResourceNamesMap))
 	out.QOSReserved = *(*map[string]string)(unsafe.Pointer(&in.QOSReserved))
 	out.RuntimeRequestTimeout = in.RuntimeRequestTimeout
 	out.HairpinMode = in.HairpinMode

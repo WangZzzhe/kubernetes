@@ -38,9 +38,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	pluginapi "k8s.io/kubelet/pkg/apis/resourceplugin/v1alpha1"
-	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager"
-	"k8s.io/kubernetes/pkg/kubelet/checkpointmanager/errors"
-	"k8s.io/kubernetes/pkg/kubelet/cm/qosresourcemanager/checkpoint"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
 	"k8s.io/kubernetes/pkg/kubelet/config"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
@@ -55,8 +52,7 @@ import (
 
 // ManagerImpl is the structure in charge of managing Resource Plugins.
 type ManagerImpl struct {
-	socketname string
-	socketdir  string
+	*BasicImpl
 
 	endpoints map[string]endpointInfo // Key is ResourceName
 
@@ -78,10 +74,6 @@ type ManagerImpl struct {
 	// contains allocated scalar resources quantity, keyed by resourceName.
 	allocatedScalarResourcesQuantity map[string]float64
 
-	// podResources contains pod to allocated resources mapping.
-	podResources      *podResourcesChk
-	checkpointManager checkpointmanager.CheckpointManager
-
 	// Store of Topology Affinties that the Resource Manager can query.
 	topologyAffinityStore topologymanager.Store
 
@@ -95,10 +87,6 @@ type ManagerImpl struct {
 
 	// reconcilePeriod is the duration between calls to reconcileState.
 	reconcilePeriod time.Duration
-
-	// Map of resource name "A" to resource name "B" during QoS Resource Manager allocation period.
-	// It's useful for the same kind resource with different types. (eg. maps best-effort-cpu to cpu)
-	resourceNamesMap map[string]string
 }
 
 type endpointInfo struct {
@@ -122,33 +110,24 @@ func NewManagerImpl(topologyAffinityStore topologymanager.Store, reconcilePeriod
 func newManagerImpl(socketPath string, topologyAffinityStore topologymanager.Store, reconcilePeriod time.Duration, resourceNamesMap map[string]string) (*ManagerImpl, error) {
 	klog.V(2).Infof("[qosresourcemanager] Creating Resource Plugin manager at %s", socketPath)
 
-	if socketPath == "" || !filepath.IsAbs(socketPath) {
-		return nil, fmt.Errorf(errBadSocket+" %s", socketPath)
+	bi, err := NewBasicImpl(socketPath, resourceNamesMap)
+	if err != nil {
+		return nil, err
 	}
 
-	dir, file := filepath.Split(socketPath)
 	manager := &ManagerImpl{
 		endpoints: make(map[string]endpointInfo),
 
-		socketname:                       file,
-		socketdir:                        dir,
 		topologyAffinityStore:            topologyAffinityStore,
-		podResources:                     newPodResourcesChk(),
 		allocatedScalarResourcesQuantity: make(map[string]float64),
 		reconcilePeriod:                  reconcilePeriod,
-		resourceNamesMap:                 resourceNamesMap,
+		BasicImpl:                        bi,
 	}
 
 	// The following structures are populated with real implementations in manager.Start()
 	// Before that, initializes them to perform no-op operations.
 	manager.activePods = func() []*v1.Pod { return []*v1.Pod{} }
 	manager.sourcesReady = &sourcesReadyStub{}
-
-	checkpointManager, err := checkpointmanager.NewCheckpointManager(dir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize checkpoint manager: %v", err)
-	}
-	manager.checkpointManager = checkpointManager
 
 	return manager, nil
 }
@@ -185,11 +164,6 @@ func (m *ManagerImpl) removeContents(dir string) error {
 		}
 	}
 	return errorsutil.NewAggregate(errs)
-}
-
-// checkpointFile returns resource plugin checkpoint file path.
-func (m *ManagerImpl) checkpointFile() string {
-	return filepath.Join(m.socketdir, kubeletQoSResourceManagerCheckpoint)
 }
 
 // Start starts the QoS Resource Plugin Manager and start initialization of
@@ -367,26 +341,6 @@ func (m *ManagerImpl) reAllocate(pod *v1.Pod, container *v1.Container) error {
 	return nil
 }
 
-func (m *ManagerImpl) isContainerRequestResource(container *v1.Container, resourceName string) (bool, error) {
-	if container == nil {
-		return false, nil
-	}
-
-	for k := range container.Resources.Requests {
-		requestedResourceName, err := m.getMappedResourceName(string(k), container.Resources.Requests)
-
-		if err != nil {
-			return false, err
-		}
-
-		if requestedResourceName == resourceName {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
 // allocateContainerResources attempts to allocate all of required resource
 // plugin resources for the input container, issues an Allocate rpc request
 // for each new resource resource requirement, processes their AllocateResponses,
@@ -533,24 +487,12 @@ func (m *ManagerImpl) allocateContainerResources(pod *v1.Pod, container *v1.Cont
 		}
 
 		// [TODO](sunjianyu): to think abount a method to aviod accompanying resouce names conflict
-		for accResourceName, allocationInfo := range resp.AllocationResult.ResourceAllocation {
-			if allocationInfo == nil {
-				klog.Warningf("[qosresourcemanager] allocation request for resources %s - accompanying resource: %s for pod: %s/%s, container: %s got nil allocation infomation",
-					resource, accResourceName, pod.Namespace, pod.Name, container.Name)
-				continue
-			}
+		m.UpdatePodResources(resp.AllocationResult.ResourceAllocation, pod, container, resource)
+		allocatedScalarResourcesQuantity := m.podResources.scalarResourcesQuantity()
 
-			klog.V(4).Infof("[qosresourcemanager] allocation information for resources %s - accompanying resource: %s for pod: %s/%s, container: %s is %v",
-				resource, accResourceName, pod.Namespace, pod.Name, container.Name, *allocationInfo)
-
-			m.podResources.insert(podUID, contName, accResourceName, allocationInfo)
-
-			allocatedScalarResourcesQuantity := m.podResources.scalarResourcesQuantity()
-
-			m.mutex.Lock()
-			m.allocatedScalarResourcesQuantity = allocatedScalarResourcesQuantity
-			m.mutex.Unlock()
-		}
+		m.mutex.Lock()
+		m.allocatedScalarResourcesQuantity = allocatedScalarResourcesQuantity
+		m.mutex.Unlock()
 	}
 
 	// Checkpoints resource to container allocation information.
@@ -838,34 +780,13 @@ func (m *ManagerImpl) GetCapacity() (v1.ResourceList, v1.ResourceList, []string)
 	return capacity, allocatable, deletedResources.UnsortedList()
 }
 
-// Checkpoints resource to container allocation information to disk.
-func (m *ManagerImpl) writeCheckpoint() error {
-	data := checkpoint.New(m.podResources.toCheckpointData())
-	err := m.checkpointManager.CreateCheckpoint(kubeletQoSResourceManagerCheckpoint, data)
-	if err != nil {
-		err2 := fmt.Errorf("[qosresourcemanager] failed to write checkpoint file %q: %v", kubeletQoSResourceManagerCheckpoint, err)
-		klog.Warning(err2)
-		return err2
-	}
-	return nil
-}
-
 // Reads resource to container allocation information from disk, and populates
 // m.allocatedScalarResourcesQuantity accordingly.
 func (m *ManagerImpl) readCheckpoint() error {
-	resEntries := make([]checkpoint.PodResourcesEntry, 0)
-	cp := checkpoint.New(resEntries)
-	err := m.checkpointManager.GetCheckpoint(kubeletQoSResourceManagerCheckpoint, cp)
+	err := m.BasicImpl.readCheckpoint()
 	if err != nil {
-		if err == errors.ErrCheckpointNotFound {
-			klog.Warningf("[qosresourcemanager] Failed to retrieve checkpoint for %q: %v", kubeletQoSResourceManagerCheckpoint, err)
-			return nil
-		}
 		return err
 	}
-
-	podResources := cp.GetData()
-	m.podResources.fromCheckpointData(podResources)
 	allocatedScalarResourcesQuantity := m.podResources.scalarResourcesQuantity()
 
 	m.mutex.Lock()
@@ -888,7 +809,7 @@ func (m *ManagerImpl) UpdateAllocatedResources() {
 	if !m.sourcesReady.AllReady() {
 		return
 	}
-	podsToBeRemoved := m.podResources.pods()
+	podsToBeRemoved := m.Pods()
 	for _, pod := range activePods {
 		podsToBeRemoved.Delete(string(pod.UID))
 	}
@@ -923,7 +844,7 @@ func (m *ManagerImpl) UpdateAllocatedResources() {
 		}
 
 		if allSuccess {
-			m.podResources.deletePod(podUID)
+			m.DeletePod(podUID)
 		} else {
 			klog.Warningf("[qosresourcemanager.UpdateAllocatedResources] pod: %s should be deleted, but it's not removed in all plugins, so keep it temporarily", podUID)
 		}
@@ -941,28 +862,6 @@ func (m *ManagerImpl) UpdateAllocatedResources() {
 	m.mutex.Lock()
 	m.allocatedScalarResourcesQuantity = allocatedScalarResourcesQuantity
 	m.mutex.Unlock()
-}
-
-// getMappedResourceName returns mapped resource name of input "resourceName" in m.resourceNamesMap if there is the mapping entry,
-// or it will return input "resourceName".
-// If both the input "resourceName" and the mapped resource name are requested, it will return error.
-func (m *ManagerImpl) getMappedResourceName(resourceName string, requests v1.ResourceList) (string, error) {
-	if _, found := m.resourceNamesMap[resourceName]; !found {
-		return resourceName, nil
-	}
-
-	mappedResourceName := m.resourceNamesMap[resourceName]
-
-	_, foundReq := requests[v1.ResourceName(resourceName)]
-	_, foundMappedReq := requests[v1.ResourceName(mappedResourceName)]
-
-	if foundReq && foundMappedReq {
-		return mappedResourceName, fmt.Errorf("both %s and mapped %s are requested", resourceName, mappedResourceName)
-	}
-
-	klog.Infof("[qosresourcemanager.getMappedResourceName] map resource name: %s to %s", resourceName, mappedResourceName)
-
-	return mappedResourceName, nil
 }
 
 // GetResourceRunContainerOptions checks whether we have cached containerResources
@@ -1177,7 +1076,7 @@ func (m *ManagerImpl) reconcileState() {
 					continue
 				}
 
-				isRequested, err := m.isContainerRequestResource(&pod.Spec.Containers[i], resourceName)
+				isRequested, err := m.IsContainerRequestResource(&pod.Spec.Containers[i], resourceName)
 
 				if err != nil {
 					klog.Errorf("[qosresourcemanager.reconcileState] isContainerRequestResource failed with error: %v", err)
