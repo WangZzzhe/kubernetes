@@ -258,9 +258,9 @@ func (m *ManagerImpl) allocateContainerResources(pod *v1.Pod, container *v1.Cont
 		// in real use as the result of this. Should also consider to parallelize resource
 		// plugin Allocate grpc calls if it becomes common that a container may require
 		// resources from multiple resource plugins.
-		m.mutex.Lock()
+		m.Mutex.Lock()
 		eI, ok := m.Endpoints[resource]
-		m.mutex.Unlock()
+		m.Mutex.Unlock()
 		if !ok {
 			return fmt.Errorf("unknown Resource Plugin %s", resource)
 		}
@@ -330,9 +330,9 @@ func (m *ManagerImpl) allocateContainerResources(pod *v1.Pod, container *v1.Cont
 		m.UpdatePodResources(resp.AllocationResult.ResourceAllocation, pod, container, resource)
 		allocatedScalarResourcesQuantity := m.podResources.scalarResourcesQuantity()
 
-		m.mutex.Lock()
+		m.Mutex.Lock()
 		m.allocatedScalarResourcesQuantity = allocatedScalarResourcesQuantity
-		m.mutex.Unlock()
+		m.Mutex.Unlock()
 	}
 
 	// Checkpoints resource to container allocation information.
@@ -356,8 +356,8 @@ func (m *ManagerImpl) UpdatePluginResources(node *schedulerframework.NodeInfo, a
 // Can be called concurrently, more than once, and is safe to call
 // without a prior Start.
 func (m *ManagerImpl) Stop() error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
+	m.Mutex.Lock()
+	defer m.Mutex.Unlock()
 	for _, eI := range m.Endpoints {
 		eI.e.stop()
 	}
@@ -385,7 +385,7 @@ func (m *ManagerImpl) GetTopologyAwareResources(pod *v1.Pod, container *v1.Conta
 	podUID := string(pod.UID)
 	containerName := string(container.Name)
 
-	m.mutex.Lock()
+	m.Mutex.Lock()
 	for resourceName, eI := range m.Endpoints {
 		if eI.e.isStopped() {
 			klog.Warningf("[qosresourcemanager] skip GetTopologyAwareResources of resource: %s for pod: %s container: %s, because plugin stopped",
@@ -394,15 +394,15 @@ func (m *ManagerImpl) GetTopologyAwareResources(pod *v1.Pod, container *v1.Conta
 		}
 
 		ctx := metadata.NewOutgoingContext(context.Background(), metadata.New(nil))
-		m.mutex.Unlock()
+		m.Mutex.Unlock()
 		curResp, err := eI.e.getTopologyAwareResources(ctx, &pluginapi.GetTopologyAwareResourcesRequest{
 			PodUid:        podUID,
 			ContainerName: containerName,
 		})
-		m.mutex.Lock()
+		m.Mutex.Lock()
 
 		if err != nil {
-			m.mutex.Unlock()
+			m.Mutex.Unlock()
 			//[TODO](sunjianyu): to discuss if we should return err if only one resource plugin gets error?
 			return nil, fmt.Errorf("getTopologyAwareResources for resource: %s failed with error: %v", resourceName, err)
 		} else if curResp == nil {
@@ -434,26 +434,26 @@ func (m *ManagerImpl) GetTopologyAwareResources(pod *v1.Pod, container *v1.Conta
 				resourceName, podUID, containerName)
 		}
 	}
-	m.mutex.Unlock()
+	m.Mutex.Unlock()
 	return resp, nil
 }
 
 func (m *ManagerImpl) GetTopologyAwareAllocatableResources() (*pluginapi.GetTopologyAwareAllocatableResourcesResponse, error) {
 	var resp *pluginapi.GetTopologyAwareAllocatableResourcesResponse
 
-	m.mutex.Lock()
+	m.Mutex.Lock()
 	for resourceName, eI := range m.Endpoints {
 		if eI.e.isStopped() {
 			klog.Warningf("[qosresourcemanager] skip GetTopologyAwareAllocatableResources of resource: %s, because plugin stopped", resourceName)
 			continue
 		}
 		ctx := metadata.NewOutgoingContext(context.Background(), metadata.New(nil))
-		m.mutex.Unlock()
+		m.Mutex.Unlock()
 		curResp, err := eI.e.getTopologyAwareAllocatableResources(ctx, &pluginapi.GetTopologyAwareAllocatableResourcesRequest{})
-		m.mutex.Lock()
+		m.Mutex.Lock()
 
 		if err != nil {
-			m.mutex.Unlock()
+			m.Mutex.Unlock()
 			//[TODO](sunjianyu): to discuss if we should return err if only one resource plugin gets error?
 			return nil, fmt.Errorf("getTopologyAwareAllocatableResources for resource: %s failed with error: %v", resourceName, err)
 		} else if curResp == nil {
@@ -477,7 +477,7 @@ func (m *ManagerImpl) GetTopologyAwareAllocatableResources() (*pluginapi.GetTopo
 			klog.Warningf("[qosresourcemanager] getTopologyAwareAllocatableResources of resource: %s, get nil resp or nil topologyAwareResources in resp", resourceName)
 		}
 	}
-	m.mutex.Unlock()
+	m.Mutex.Unlock()
 	return resp, nil
 }
 
@@ -497,7 +497,7 @@ func (m *ManagerImpl) GetCapacity() (v1.ResourceList, v1.ResourceList, []string)
 	var capacity = v1.ResourceList{}
 	var allocatable = v1.ResourceList{}
 	deletedResources := sets.NewString()
-	m.mutex.Lock()
+	m.Mutex.Lock()
 	// [TODO](sunjianyu): consider we need diff capacity and allocatable here?
 	for resourceName, eI := range m.Endpoints {
 		implicitIsNodeResource := m.isNodeResource(resourceName)
@@ -511,9 +511,9 @@ func (m *ManagerImpl) GetCapacity() (v1.ResourceList, v1.ResourceList, []string)
 			deletedResources.Insert(resourceName)
 		} else {
 			ctx := metadata.NewOutgoingContext(context.Background(), metadata.New(nil))
-			m.mutex.Unlock()
+			m.Mutex.Unlock()
 			resp, err := eI.e.getTopologyAwareAllocatableResources(ctx, &pluginapi.GetTopologyAwareAllocatableResourcesRequest{})
-			m.mutex.Lock()
+			m.Mutex.Lock()
 			if err != nil {
 				klog.Errorf("[qosresourcemanager] getTopologyAwareAllocatableResources for resource: %s failed with error: %v", resourceName, err)
 				if !implicitIsNodeResource {
@@ -553,7 +553,7 @@ func (m *ManagerImpl) GetCapacity() (v1.ResourceList, v1.ResourceList, []string)
 			}
 		}
 	}
-	m.mutex.Unlock()
+	m.Mutex.Unlock()
 	return capacity, allocatable, deletedResources.UnsortedList()
 }
 
@@ -574,7 +574,7 @@ func (m *ManagerImpl) UpdateAllocatedResources() {
 	podsToBeRemovedList := podsToBeRemoved.UnsortedList()
 	klog.V(3).Infof("[qosresourcemanager] pods to be removed: %v", podsToBeRemovedList)
 
-	m.mutex.Lock()
+	m.Mutex.Lock()
 	for _, podUID := range podsToBeRemovedList {
 
 		allSuccess := true
@@ -585,11 +585,11 @@ func (m *ManagerImpl) UpdateAllocatedResources() {
 			}
 
 			ctx := metadata.NewOutgoingContext(context.Background(), metadata.New(nil))
-			m.mutex.Unlock()
+			m.Mutex.Unlock()
 			_, err := eI.e.removePod(ctx, &pluginapi.RemovePodRequest{
 				PodUid: podUID,
 			})
-			m.mutex.Lock()
+			m.Mutex.Lock()
 
 			if err != nil {
 				allSuccess = false
@@ -603,7 +603,7 @@ func (m *ManagerImpl) UpdateAllocatedResources() {
 			klog.Warningf("[qosresourcemanager.UpdateAllocatedResources] pod: %s should be deleted, but it's not removed in all plugins, so keep it temporarily", podUID)
 		}
 	}
-	m.mutex.Unlock()
+	m.Mutex.Unlock()
 
 	err := m.writeCheckpoint()
 
@@ -613,9 +613,9 @@ func (m *ManagerImpl) UpdateAllocatedResources() {
 
 	// Regenerated allocatedScalarResourcesQuantity after we update pod allocation information.
 	allocatedScalarResourcesQuantity := m.podResources.scalarResourcesQuantity()
-	m.mutex.Lock()
+	m.Mutex.Lock()
 	m.allocatedScalarResourcesQuantity = allocatedScalarResourcesQuantity
-	m.mutex.Unlock()
+	m.Mutex.Unlock()
 }
 
 // GetResourceRunContainerOptions checks whether we have cached containerResources
@@ -679,20 +679,20 @@ func (m *ManagerImpl) GetResourceRunContainerOptions(pod *v1.Pod, container *v1.
 // callPreStartContainerIfNeeded issues PreStartContainer grpc call for resource plugin resource
 // with PreStartRequired option set.
 func (m *ManagerImpl) callPreStartContainerIfNeeded(pod *v1.Pod, container *v1.Container, resource string) error {
-	m.mutex.Lock()
+	m.Mutex.Lock()
 	eI, ok := m.Endpoints[resource]
 	if !ok {
-		m.mutex.Unlock()
+		m.Mutex.Unlock()
 		return fmt.Errorf("endpoint not found in cache for a registered resource: %s", resource)
 	}
 
 	if eI.opts == nil || !eI.opts.PreStartRequired {
-		m.mutex.Unlock()
+		m.Mutex.Unlock()
 		klog.V(4).Infof("[qosresourcemanager] resource plugin options indicate to skip PreStartContainer for resource: %s", resource)
 		return nil
 	}
 
-	m.mutex.Unlock()
+	m.Mutex.Unlock()
 	klog.V(4).Infof("[qosresourcemanager] Issuing an PreStartContainer call for container, %s, of pod %s", container.Name, pod.Name)
 	_, err := eI.e.preStartContainer(pod, container)
 	if err != nil {
@@ -714,8 +714,8 @@ func (m *ManagerImpl) sanitizeNodeAllocatable(node *schedulerframework.NodeInfo)
 		allocatableResource.ScalarResources = make(map[v1.ResourceName]int64)
 	}
 
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
+	m.Mutex.Lock()
+	defer m.Mutex.Unlock()
 	for resource, allocatedQuantity := range m.allocatedScalarResourcesQuantity {
 		quant, ok := allocatableResource.ScalarResources[v1.ResourceName(resource)]
 		if ok && float64(quant) >= allocatedQuantity {
@@ -734,9 +734,9 @@ func (m *ManagerImpl) sanitizeNodeAllocatable(node *schedulerframework.NodeInfo)
 }
 
 func (m *ManagerImpl) isResourcePluginResource(resource string) bool {
-	m.mutex.Lock()
+	m.Mutex.Lock()
 	_, registeredResource := m.Endpoints[resource]
-	m.mutex.Unlock()
+	m.Mutex.Unlock()
 
 	if registeredResource {
 		return true
@@ -771,7 +771,7 @@ func (m *ManagerImpl) reconcileState() {
 
 	resourceAllocationResps := make(map[string]*pluginapi.GetResourcesAllocationResponse)
 
-	m.mutex.Lock()
+	m.Mutex.Lock()
 
 	for resourceName, eI := range m.Endpoints {
 		if eI.e.isStopped() {
@@ -783,9 +783,9 @@ func (m *ManagerImpl) reconcileState() {
 		}
 
 		ctx := metadata.NewOutgoingContext(context.Background(), metadata.New(nil))
-		m.mutex.Unlock()
+		m.Mutex.Unlock()
 		resp, err := eI.e.getResourceAllocation(ctx, &pluginapi.GetResourcesAllocationRequest{})
-		m.mutex.Lock()
+		m.Mutex.Lock()
 
 		if err != nil {
 			klog.Errorf("[qosresourcemanager.reconcileState] getResourceAllocation to %s endpoint failed with error: %v", resourceName, err)
@@ -794,7 +794,7 @@ func (m *ManagerImpl) reconcileState() {
 
 		resourceAllocationResps[resourceName] = resp
 	}
-	m.mutex.Unlock()
+	m.Mutex.Unlock()
 
 	for _, pod := range activePods {
 		if pod == nil {

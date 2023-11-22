@@ -103,9 +103,9 @@ func (m *ManagerImpl) GetTopologyHints(pod *v1.Pod, container *v1.Container) map
 			}
 
 			startRPCTime := time.Now()
-			m.mutex.Lock()
+			m.Mutex.Lock()
 			eI, ok := m.Endpoints[resource]
-			m.mutex.Unlock()
+			m.Mutex.Unlock()
 			if !ok {
 				klog.Errorf("[qosresourcemanager] unknown Resource Plugin %s", resource)
 				resourceHints[resource] = []topologymanager.TopologyHint{}
@@ -157,8 +157,8 @@ func (m *ManagerImpl) GetTopologyHints(pod *v1.Pod, container *v1.Container) map
 }
 
 func (m *ManagerImpl) resourceHasTopologyAlignment(resource string) bool {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
+	m.Mutex.Lock()
+	defer m.Mutex.Unlock()
 	eI, ok := m.Endpoints[resource]
 	if !ok {
 		return false

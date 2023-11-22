@@ -31,7 +31,7 @@ type BasicImpl struct {
 	Endpoints map[string]endpointInfo // Key is ResourceName
 
 	// lock when accesing Endpoints and allocatedScalarResourcesQuantity
-	mutex sync.Mutex
+	Mutex sync.Mutex
 
 	server *grpc.Server
 	wg     sync.WaitGroup
@@ -78,6 +78,22 @@ func NewBasicImpl(socketPath string, resourceNamesMap map[string]string) (*Basic
 type endpointInfo struct {
 	e    endpoint
 	opts *pluginapi.ResourcePluginOptions
+}
+
+func (e *endpointInfo) Allocate(c context.Context, resourceRequest *pluginapi.ResourceRequest) (*pluginapi.ResourceAllocationResponse, error) {
+	return e.e.allocate(c, resourceRequest)
+}
+
+func (e *endpointInfo) RemovePod(c context.Context, removePodRequest *pluginapi.RemovePodRequest) (*pluginapi.RemovePodResponse, error) {
+	return e.e.removePod(c, removePodRequest)
+}
+
+func (e *endpointInfo) GetResourceAllocation(c context.Context, request *pluginapi.GetResourcesAllocationRequest) (*pluginapi.GetResourcesAllocationResponse, error) {
+	return e.e.getResourceAllocation(c, request)
+}
+
+func (e *endpointInfo) IsStopped() bool {
+	return e.e.isStopped()
 }
 
 func (bi *BasicImpl) Start() error {
@@ -201,8 +217,8 @@ func (bi *BasicImpl) RegisterPlugin(pluginName string, endpoint string, versions
 // TODO work on the behavior for deregistering plugins
 // e.g: Should we delete the resource
 func (bi *BasicImpl) DeRegisterPlugin(pluginName string) {
-	bi.mutex.Lock()
-	defer bi.mutex.Unlock()
+	bi.Mutex.Lock()
+	defer bi.Mutex.Unlock()
 
 	if eI, ok := bi.Endpoints[pluginName]; ok {
 		eI.e.stop()
@@ -273,8 +289,8 @@ func (bi *BasicImpl) isVersionCompatibleWithPlugin(versions []string) bool {
 }
 
 func (bi *BasicImpl) registerEndpoint(resourceName string, options *pluginapi.ResourcePluginOptions, e endpoint) {
-	bi.mutex.Lock()
-	defer bi.mutex.Unlock()
+	bi.Mutex.Lock()
+	defer bi.Mutex.Unlock()
 
 	old, ok := bi.Endpoints[resourceName]
 
@@ -377,7 +393,7 @@ func (bi *BasicImpl) readCheckpoint() error {
 
 	allocatedScalarResourcesQuantity := bi.podResources.scalarResourcesQuantity()
 
-	bi.mutex.Lock()
+	bi.Mutex.Lock()
 	bi.allocatedScalarResourcesQuantity = allocatedScalarResourcesQuantity
 
 	allocatedResourceNames := bi.podResources.allAllocatedResourceNames()
@@ -386,7 +402,7 @@ func (bi *BasicImpl) readCheckpoint() error {
 		bi.Endpoints[allocatedResourceName] = endpointInfo{e: newStoppedEndpointImpl(allocatedResourceName), opts: nil}
 	}
 
-	bi.mutex.Unlock()
+	bi.Mutex.Unlock()
 
 	return nil
 }
