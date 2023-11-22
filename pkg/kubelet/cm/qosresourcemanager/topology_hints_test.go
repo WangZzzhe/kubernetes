@@ -145,10 +145,12 @@ func TestGetTopologyHints(t *testing.T) {
 
 	for _, tc := range testCases {
 		m := ManagerImpl{
-			podResources: newPodResourcesChk(),
+			BasicImpl: &BasicImpl{
+				podResources: newPodResourcesChk(),
+				Endpoints:    tc.endpoints,
+			},
 			sourcesReady: &sourcesReadyStub{},
 			activePods:   func() []*v1.Pod { return []*v1.Pod{tc.pod} },
-			endpoints:    tc.endpoints,
 		}
 
 		hints := m.GetTopologyHints(tc.pod, &tc.pod.Spec.Containers[0])
@@ -198,11 +200,11 @@ func TestResourceHasTopologyAlignment(t *testing.T) {
 	as.Nil(err)
 
 	//Doesn't have
-	testManager.endpoints[res1.resourceName].opts.WithTopologyAlignment = false
+	testManager.Endpoints[res1.resourceName].opts.WithTopologyAlignment = false
 	Alignment := testManager.resourceHasTopologyAlignment(res1.resourceName)
 	as.Equal(false, Alignment)
 	//Has
-	testManager.endpoints[res2.resourceName].opts.WithTopologyAlignment = true
+	testManager.Endpoints[res2.resourceName].opts.WithTopologyAlignment = true
 	Alignment = testManager.resourceHasTopologyAlignment(res2.resourceName)
 	as.Equal(true, Alignment)
 }

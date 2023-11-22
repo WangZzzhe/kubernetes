@@ -73,7 +73,7 @@ func TestNewManagerImplStart(t *testing.T) {
 	// ensures register successful after start server and plugin
 	err = p.Register(socketName, testResourceName, socketDir)
 	require.Nil(t, err)
-	_, exists := m.endpoints[testResourceName]
+	_, exists := m.Endpoints[testResourceName]
 	require.True(t, exists)
 
 	cleanup(t, m, p, nil)
@@ -89,7 +89,7 @@ func TestNewManagerImplStartProbeMode(t *testing.T) {
 	m, p, _, stopCh := setupInProbeMode(t, socketName, pluginSocketName)
 	// make plugin register to QRM automatically by plugin manager
 	time.Sleep(time.Second)
-	_, exists := m.endpoints[testResourceName]
+	_, exists := m.Endpoints[testResourceName]
 	require.True(t, exists)
 	cleanup(t, m, p, stopCh)
 }
@@ -289,7 +289,7 @@ func TestManagerAllocate(t *testing.T) {
 	testPods[1].OwnerReferences = nil
 
 	// endpoint isStopped
-	e1 := testManager.endpoints[res1.resourceName].e
+	e1 := testManager.Endpoints[res1.resourceName].e
 	e1.stop()
 	setPodAnnotation(testPods[1], pluginapi.KatalystQoSLevelAnnotationKey, pluginapi.KatalystQoSLevelReclaimedCores)
 	err = testManager.Allocate(testPods[1], &testPods[1].Spec.Containers[0])
@@ -484,20 +484,20 @@ func TestDeRegisterPlugin(t *testing.T) {
 	testManager, err := getTestManager(tmpDir, podsStub.getActivePods, testResources)
 	as.Nil(err)
 
-	_, exists := testManager.endpoints[res1.resourceName]
+	_, exists := testManager.Endpoints[res1.resourceName]
 	as.True(exists)
 
-	as.NotNil(testManager.endpoints[res1.resourceName].e)
-	as.False(testManager.endpoints[res1.resourceName].e.isStopped())
+	as.NotNil(testManager.Endpoints[res1.resourceName].e)
+	as.False(testManager.Endpoints[res1.resourceName].e.isStopped())
 
 	testManager.DeRegisterPlugin(res1.resourceName)
 
-	_, exists = testManager.endpoints[res1.resourceName]
+	_, exists = testManager.Endpoints[res1.resourceName]
 	as.True(exists)
 
 	// ensures DeRegisterPlugin worked
-	as.NotNil(testManager.endpoints[res1.resourceName].e)
-	as.True(testManager.endpoints[res1.resourceName].e.isStopped())
+	as.NotNil(testManager.Endpoints[res1.resourceName].e)
+	as.True(testManager.Endpoints[res1.resourceName].e.isStopped())
 }
 
 func TestUtils(t *testing.T) {
@@ -893,10 +893,10 @@ func TestGetCapacity(t *testing.T) {
 	//Stops resource1 endpoint.
 	flag = 1
 	SGP = 1
-	testManager.endpoints[res1.resourceName] = endpointInfo{
+	testManager.Endpoints[res1.resourceName] = endpointInfo{
 		e: &MockEndpoint{topologyAllocatable: topologyStubAllocatable()},
 	}
-	testManager.endpoints["cpu"] = endpointInfo{
+	testManager.Endpoints["cpu"] = endpointInfo{
 		e: &MockEndpoint{},
 	}
 	_, allocatable, deletedResourcesName := testManager.GetCapacity()
@@ -908,7 +908,7 @@ func TestGetCapacity(t *testing.T) {
 	as.False(ds.Has("cpu"))
 	//
 	SGP = 0
-	testManager.endpoints[res1.resourceName] = endpointInfo{
+	testManager.Endpoints[res1.resourceName] = endpointInfo{
 		e: &MockEndpoint{topologyAllocatable: topologyStubAllocatable()},
 	}
 	capacity, allocatable, _ := testManager.GetCapacity()
@@ -919,7 +919,7 @@ func TestGetCapacity(t *testing.T) {
 
 	//add 4 resource2
 	flag = 2
-	testManager.endpoints[res2.resourceName] = endpointInfo{
+	testManager.Endpoints[res2.resourceName] = endpointInfo{
 		e: &MockEndpoint{topologyAllocatable: topologyStubAllocatable()},
 	}
 	capacity, allocatable, _ = testManager.GetCapacity()
@@ -1146,36 +1146,36 @@ func constructResourceAlloc(OciPropertyName string, IsNodeResource bool, IsScala
 }
 
 /*
-func TestResetExtendedResource(t *testing.T) {
-	as := assert.New(t)
-	tmpDir, err := ioutil.TempDir("", "checkpoint")
-	as.Nil(err)
-	ckm, err := checkpointmanager.NewCheckpointManager(tmpDir)
-	as.Nil(err)
-	testManager := &ManagerImpl{
-		endpoints:                        make(map[string]endpointInfo),
-		allocatedScalarResourcesQuantity: make(map[string]float64),
-		podResources:                     newPodResourcesChk(),
-		checkpointManager:                ckm,
-	}
-	extendedResourceName := "domain.com/resource1"
-	testManager.podResources.insert("pod", "con", extendedResourceName, constructResourceAlloc("Name", true, true))
-
-	//checkpoint is present, indicating node hasn't been recreated
-	err = testManager.writeCheckpoint()
-	as.Nil(err)
-	as.False(testManager.ShouldResetExtendedResourceCapacity())
-
-	//checkpoint is absent, representing node recreation
-	ckpts, err := ckm.ListCheckpoints()
-	as.Nil(err)
-	for _, ckpt := range ckpts {
-		err := ckm.RemoveCheckpoint(ckpt)
+	func TestResetExtendedResource(t *testing.T) {
+		as := assert.New(t)
+		tmpDir, err := ioutil.TempDir("", "checkpoint")
 		as.Nil(err)
+		ckm, err := checkpointmanager.NewCheckpointManager(tmpDir)
+		as.Nil(err)
+		testManager := &ManagerImpl{
+			Endpoints:                        make(map[string]endpointInfo),
+			allocatedScalarResourcesQuantity: make(map[string]float64),
+			podResources:                     newPodResourcesChk(),
+			checkpointManager:                ckm,
+		}
+		extendedResourceName := "domain.com/resource1"
+		testManager.podResources.insert("pod", "con", extendedResourceName, constructResourceAlloc("Name", true, true))
+
+		//checkpoint is present, indicating node hasn't been recreated
+		err = testManager.writeCheckpoint()
+		as.Nil(err)
+		as.False(testManager.ShouldResetExtendedResourceCapacity())
+
+		//checkpoint is absent, representing node recreation
+		ckpts, err := ckm.ListCheckpoints()
+		as.Nil(err)
+		for _, ckpt := range ckpts {
+			err := ckm.RemoveCheckpoint(ckpt)
+			as.Nil(err)
+		}
+		utilfeature.DefaultMutableFeatureGate.Set("QoSResourceManager=true")
+		as.True(testManager.ShouldResetExtendedResourceCapacity())
 	}
-	utilfeature.DefaultMutableFeatureGate.Set("QoSResourceManager=true")
-	as.True(testManager.ShouldResetExtendedResourceCapacity())
-}
 */
 func setupManager(t *testing.T, socketName string) *ManagerImpl {
 	topologyStore := topologymanager.NewFakeManager()
@@ -1344,17 +1344,20 @@ func getTestManager(tmpDir string, activePods ActivePodsFunc, testRes []TestReso
 		return nil, err
 	}
 	testManager := &ManagerImpl{
-		socketdir:                        tmpDir,
-		socketname:                       "/server.sock",
-		allocatedScalarResourcesQuantity: make(map[string]float64),
-		endpoints:                        make(map[string]endpointInfo),
-		podResources:                     newPodResourcesChk(),
-		topologyAffinityStore:            topologymanager.NewFakeManager(),
-		activePods:                       activePods,
-		sourcesReady:                     &sourcesReadyStub{},
-		checkpointManager:                ckm,
-		containerRuntime:                 &apitest.FakeRuntimeService{},
-		reconcilePeriod:                  5 * time.Second,
+		BasicImpl: &BasicImpl{
+			socketdir:                        tmpDir,
+			socketname:                       "/server.sock",
+			allocatedScalarResourcesQuantity: make(map[string]float64),
+			Endpoints:                        make(map[string]endpointInfo),
+			podResources:                     newPodResourcesChk(),
+			checkpointManager:                ckm,
+		},
+
+		topologyAffinityStore: topologymanager.NewFakeManager(),
+		activePods:            activePods,
+		sourcesReady:          &sourcesReadyStub{},
+		containerRuntime:      &apitest.FakeRuntimeService{},
+		reconcilePeriod:       5 * time.Second,
 	}
 
 	registerEndpointByRes(testManager, testRes)

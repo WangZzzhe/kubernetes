@@ -20,21 +20,15 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"net"
 	"os"
-	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/golang/protobuf/proto"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"k8s.io/klog/v2"
 
-	"github.com/opencontainers/selinux/go-selinux"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	errorsutil "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	pluginapi "k8s.io/kubelet/pkg/apis/resourceplugin/v1alpha1"
@@ -54,14 +48,6 @@ import (
 type ManagerImpl struct {
 	*BasicImpl
 
-	endpoints map[string]endpointInfo // Key is ResourceName
-
-	// lock when accesing endpoints and allocatedScalarResourcesQuantity
-	mutex sync.Mutex
-
-	server *grpc.Server
-	wg     sync.WaitGroup
-
 	// activePods is a method for listing active pods on the node
 	// so the amount of pluginResources requested by existing pods
 	// could be counted when updating allocated resources
@@ -70,9 +56,6 @@ type ManagerImpl struct {
 	// sourcesReady provides the readiness of kubelet configuration sources such as apiserver update readiness.
 	// We use it to determine when we can purge inactive pods from checkpointed state.
 	sourcesReady config.SourcesReady
-
-	// contains allocated scalar resources quantity, keyed by resourceName.
-	allocatedScalarResourcesQuantity map[string]float64
 
 	// Store of Topology Affinties that the Resource Manager can query.
 	topologyAffinityStore topologymanager.Store
@@ -87,11 +70,6 @@ type ManagerImpl struct {
 
 	// reconcilePeriod is the duration between calls to reconcileState.
 	reconcilePeriod time.Duration
-}
-
-type endpointInfo struct {
-	e    endpoint
-	opts *pluginapi.ResourcePluginOptions
 }
 
 type sourcesReadyStub struct{}
@@ -116,12 +94,9 @@ func newManagerImpl(socketPath string, topologyAffinityStore topologymanager.Sto
 	}
 
 	manager := &ManagerImpl{
-		endpoints: make(map[string]endpointInfo),
-
-		topologyAffinityStore:            topologyAffinityStore,
-		allocatedScalarResourcesQuantity: make(map[string]float64),
-		reconcilePeriod:                  reconcilePeriod,
-		BasicImpl:                        bi,
+		topologyAffinityStore: topologyAffinityStore,
+		reconcilePeriod:       reconcilePeriod,
+		BasicImpl:             bi,
 	}
 
 	// The following structures are populated with real implementations in manager.Start()
@@ -132,105 +107,27 @@ func newManagerImpl(socketPath string, topologyAffinityStore topologymanager.Sto
 	return manager, nil
 }
 
-func (m *ManagerImpl) removeContents(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	names, err := d.Readdirnames(-1)
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, name := range names {
-		filePath := filepath.Join(dir, name)
-		if filePath == m.checkpointFile() {
-			continue
-		}
-		stat, err := os.Stat(filePath)
-		if err != nil {
-			klog.Errorf("[qosresourcemanager] Failed to stat file %s: %v", filePath, err)
-			continue
-		}
-		if stat.IsDir() {
-			continue
-		}
-		err = os.RemoveAll(filePath)
-		if err != nil {
-			errs = append(errs, err)
-			klog.Errorf("[qosresourcemanager] Failed to remove file %s: %v", filePath, err)
-			continue
-		}
-	}
-	return errorsutil.NewAggregate(errs)
-}
-
 // Start starts the QoS Resource Plugin Manager and start initialization of
 // podResources and allocatedScalarResourcesQuantity information from checkpointed state and
 // starts resource plugin registration service.
 func (m *ManagerImpl) Start(activePods ActivePodsFunc, sourcesReady config.SourcesReady, podStatusProvider status.PodStatusProvider, containerRuntime runtimeService) error {
 	klog.V(2).Infof("[qosresourcemanager] Starting Resource Plugin manager")
 
+	err := m.BasicImpl.Start()
+	if err != nil {
+		return err
+	}
+
 	m.activePods = activePods
 	m.sourcesReady = sourcesReady
 	m.podStatusProvider = podStatusProvider
 	m.containerRuntime = containerRuntime
 
-	// Loads in podResources information from disk.
-	err := m.readCheckpoint()
-	if err != nil {
-		klog.Warningf("[qosresourcemanager] Continue after failing to read checkpoint file. Resource allocation info may NOT be up-to-date. Err: %v", err)
-	}
-
-	socketPath := filepath.Join(m.socketdir, m.socketname)
-
-	if err = os.MkdirAll(m.socketdir, 0750); err != nil {
-		return err
-	}
-	if selinux.GetEnabled() {
-		if err := selinux.SetFileLabel(m.socketdir, config.KubeletPluginsDirSELinuxLabel); err != nil {
-			klog.Warningf("[qosresourcemanager] Unprivileged containerized plugins might not work. Could not set selinux context on %s: %v", m.socketdir, err)
-		}
-	}
-
-	// Removes all stale sockets in m.socketdir. Resource plugins can monitor
-	// this and use it as a signal to re-register with the new Kubelet.
-	if err := m.removeContents(m.socketdir); err != nil {
-		klog.Errorf("[qosresourcemanager] Fail to clean up stale contents under %s: %v", m.socketdir, err)
-	}
-
-	s, err := net.Listen("unix", socketPath)
-	if err != nil {
-		klog.Errorf(errListenSocket+" %v", err)
-		return err
-	}
-
-	m.wg.Add(1)
-	m.server = grpc.NewServer([]grpc.ServerOption{}...)
-
-	pluginapi.RegisterRegistrationServer(m.server, m)
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	klog.V(2).Infof("[qosresourcemanager] Serving resource plugin registration server on %q", socketPath)
-	go func() {
-		defer func() {
-			m.wg.Done()
-			cancel()
-
-			if err := recover(); err != nil {
-				klog.Fatalf("[qosresourcemanager] Start recover from err: %v", err)
-			}
-		}()
-		m.server.Serve(s)
-	}()
-
 	klog.Infof("[qosresourcemanager] reconciling every %v", m.reconcilePeriod)
 
 	// Periodically call m.reconcileState() to continue to keep the resources allocation for
 	// all active pods in sync with the latest result allocated by corresponding resource plugin
-	go wait.Until(func() { m.reconcileState() }, m.reconcilePeriod, ctx.Done())
+	go wait.Until(func() { m.reconcileState() }, m.reconcilePeriod, m.ctx.Done())
 
 	return nil
 }
@@ -245,63 +142,6 @@ func (m *ManagerImpl) GetWatcherHandler() cache.PluginHandler {
 	}
 
 	return cache.PluginHandler(m)
-}
-
-// ValidatePlugin validates a plugin if the version is correct and the name has the format of an extended resource
-func (m *ManagerImpl) ValidatePlugin(pluginName string, endpoint string, versions []string) error {
-	klog.V(2).Infof("Got Plugin %s at endpoint %s with versions %v", pluginName, endpoint, versions)
-
-	if !m.isVersionCompatibleWithPlugin(versions) {
-		return fmt.Errorf("manager version, %s, is not among plugin supported versions %v", pluginapi.Version, versions)
-	}
-
-	return nil
-}
-
-// RegisterPlugin starts the endpoint and registers it
-func (m *ManagerImpl) RegisterPlugin(pluginName string, endpoint string, versions []string) error {
-	klog.V(2).Infof("[qosresourcemanager] Registering Plugin %s at endpoint %s", pluginName, endpoint)
-
-	e, err := newEndpointImpl(endpoint, pluginName)
-	if err != nil {
-		return fmt.Errorf("[qosresourcemanager] failed to dial resource plugin with socketPath %s: %v", endpoint, err)
-	}
-
-	options, err := e.client.GetResourcePluginOptions(context.Background(), &pluginapi.Empty{})
-	if err != nil {
-		return fmt.Errorf("[qosresourcemanager] failed to get resource plugin options: %v", err)
-	}
-
-	m.registerEndpoint(pluginName, options, e)
-
-	return nil
-}
-
-// DeRegisterPlugin deregisters the plugin
-// TODO work on the behavior for deregistering plugins
-// e.g: Should we delete the resource
-func (m *ManagerImpl) DeRegisterPlugin(pluginName string) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	if eI, ok := m.endpoints[pluginName]; ok {
-		eI.e.stop()
-	}
-}
-
-func (m *ManagerImpl) isVersionCompatibleWithPlugin(versions []string) bool {
-	// TODO(sunjianyu): Currently this is fine as we only have a single supported version. When we do need to support
-	// multiple versions in the future, we may need to extend this function to return a supported version.
-	// E.g., say kubelet supports v1beta1 and v1beta2, and we get v1alpha1 and v1beta1 from a resource plugin,
-	// this function should return v1beta1
-	for _, version := range versions {
-		for _, supportedVersion := range pluginapi.SupportedVersions {
-			if version == supportedVersion {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // Allocate is the call that you can use to allocate a set of resources
@@ -419,7 +259,7 @@ func (m *ManagerImpl) allocateContainerResources(pod *v1.Pod, container *v1.Cont
 		// plugin Allocate grpc calls if it becomes common that a container may require
 		// resources from multiple resource plugins.
 		m.mutex.Lock()
-		eI, ok := m.endpoints[resource]
+		eI, ok := m.Endpoints[resource]
 		m.mutex.Unlock()
 		if !ok {
 			return fmt.Errorf("unknown Resource Plugin %s", resource)
@@ -512,50 +352,13 @@ func (m *ManagerImpl) UpdatePluginResources(node *schedulerframework.NodeInfo, a
 	return nil
 }
 
-// Register registers a resource plugin.
-func (m *ManagerImpl) Register(ctx context.Context, r *pluginapi.RegisterRequest) (*pluginapi.Empty, error) {
-	klog.Infof("[qosresourcemanager] Got registration request from resource plugin with resource name %q", r.ResourceName)
-	metrics.ResourcePluginRegistrationCount.WithLabelValues(r.ResourceName).Inc()
-	var versionCompatible bool
-	for _, v := range pluginapi.SupportedVersions {
-		if r.Version == v {
-			versionCompatible = true
-			break
-		}
-	}
-	if !versionCompatible {
-		errorString := fmt.Sprintf(errUnsupportedVersion, r.Version, pluginapi.SupportedVersions)
-		klog.Infof("Bad registration request from resource plugin with resource name %q: %s", r.ResourceName, errorString)
-		return &pluginapi.Empty{}, fmt.Errorf(errorString)
-	}
-
-	// TODO: for now, always accepts newest resource plugin. Later may consider to
-	// add some policies here, e.g., verify whether an old resource plugin with the
-	// same resource name is still alive to determine whether we want to accept
-	// the new registration.
-	success := make(chan bool)
-	go m.addEndpoint(r, success)
-	select {
-	case pass := <-success:
-		if pass {
-			klog.Infof("[qosresourcemanager] Register resource plugin for %s success", r.ResourceName)
-			return &pluginapi.Empty{}, nil
-		}
-		klog.Errorf("[qosresourcemanager] Register resource plugin for %s fail", r.ResourceName)
-		return &pluginapi.Empty{}, fmt.Errorf("failed to register resource %s", r.ResourceName)
-	case <-ctx.Done():
-		klog.Errorf("[qosresourcemanager] Register resource plugin for %s timeout", r.ResourceName)
-		return &pluginapi.Empty{}, fmt.Errorf("timeout to register resource %s", r.ResourceName)
-	}
-}
-
 // Stop is the function that can stop the gRPC server.
 // Can be called concurrently, more than once, and is safe to call
 // without a prior Start.
 func (m *ManagerImpl) Stop() error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	for _, eI := range m.endpoints {
+	for _, eI := range m.Endpoints {
 		eI.e.stop()
 	}
 
@@ -566,32 +369,6 @@ func (m *ManagerImpl) Stop() error {
 	m.wg.Wait()
 	m.server = nil
 	return nil
-}
-
-func (m *ManagerImpl) registerEndpoint(resourceName string, options *pluginapi.ResourcePluginOptions, e endpoint) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	old, ok := m.endpoints[resourceName]
-
-	if ok && !old.e.isStopped() {
-		klog.V(2).Infof("[qosresourcemanager] stop old endpoint: %v", old.e)
-		old.e.stop()
-	}
-
-	m.endpoints[resourceName] = endpointInfo{e: e, opts: options}
-	klog.V(2).Infof("[qosresourcemanager] Registered endpoint %v", e)
-}
-
-func (m *ManagerImpl) addEndpoint(r *pluginapi.RegisterRequest, success chan<- bool) {
-	new, err := newEndpointImpl(filepath.Join(m.socketdir, r.Endpoint), r.ResourceName)
-	if err != nil {
-		klog.Errorf("[qosresourcemanager] Failed to dial resource plugin with request %v: %v", r, err)
-		success <- false
-		return
-	}
-	m.registerEndpoint(r.ResourceName, r.Options, new)
-	success <- true
 }
 
 func (m *ManagerImpl) GetTopologyAwareResources(pod *v1.Pod, container *v1.Container) (*pluginapi.GetTopologyAwareResourcesResponse, error) {
@@ -609,7 +386,7 @@ func (m *ManagerImpl) GetTopologyAwareResources(pod *v1.Pod, container *v1.Conta
 	containerName := string(container.Name)
 
 	m.mutex.Lock()
-	for resourceName, eI := range m.endpoints {
+	for resourceName, eI := range m.Endpoints {
 		if eI.e.isStopped() {
 			klog.Warningf("[qosresourcemanager] skip GetTopologyAwareResources of resource: %s for pod: %s container: %s, because plugin stopped",
 				resourceName, podUID, containerName)
@@ -665,7 +442,7 @@ func (m *ManagerImpl) GetTopologyAwareAllocatableResources() (*pluginapi.GetTopo
 	var resp *pluginapi.GetTopologyAwareAllocatableResourcesResponse
 
 	m.mutex.Lock()
-	for resourceName, eI := range m.endpoints {
+	for resourceName, eI := range m.Endpoints {
 		if eI.e.isStopped() {
 			klog.Warningf("[qosresourcemanager] skip GetTopologyAwareAllocatableResources of resource: %s, because plugin stopped", resourceName)
 			continue
@@ -722,7 +499,7 @@ func (m *ManagerImpl) GetCapacity() (v1.ResourceList, v1.ResourceList, []string)
 	deletedResources := sets.NewString()
 	m.mutex.Lock()
 	// [TODO](sunjianyu): consider we need diff capacity and allocatable here?
-	for resourceName, eI := range m.endpoints {
+	for resourceName, eI := range m.Endpoints {
 		implicitIsNodeResource := m.isNodeResource(resourceName)
 
 		if eI.e.stopGracePeriodExpired() {
@@ -730,7 +507,7 @@ func (m *ManagerImpl) GetCapacity() (v1.ResourceList, v1.ResourceList, []string)
 				klog.Infof("[qosresourcemanager] skip GetCapacity for resource: %s with implicitIsNodeResource: %v", resourceName, implicitIsNodeResource)
 				continue
 			}
-			delete(m.endpoints, resourceName)
+			delete(m.Endpoints, resourceName)
 			deletedResources.Insert(resourceName)
 		} else {
 			ctx := metadata.NewOutgoingContext(context.Background(), metadata.New(nil))
@@ -780,29 +557,6 @@ func (m *ManagerImpl) GetCapacity() (v1.ResourceList, v1.ResourceList, []string)
 	return capacity, allocatable, deletedResources.UnsortedList()
 }
 
-// Reads resource to container allocation information from disk, and populates
-// m.allocatedScalarResourcesQuantity accordingly.
-func (m *ManagerImpl) readCheckpoint() error {
-	err := m.BasicImpl.readCheckpoint()
-	if err != nil {
-		return err
-	}
-	allocatedScalarResourcesQuantity := m.podResources.scalarResourcesQuantity()
-
-	m.mutex.Lock()
-	m.allocatedScalarResourcesQuantity = allocatedScalarResourcesQuantity
-
-	allocatedResourceNames := m.podResources.allAllocatedResourceNames()
-
-	for _, allocatedResourceName := range allocatedResourceNames.UnsortedList() {
-		m.endpoints[allocatedResourceName] = endpointInfo{e: newStoppedEndpointImpl(allocatedResourceName), opts: nil}
-	}
-
-	m.mutex.Unlock()
-
-	return nil
-}
-
 // UpdateAllocatedResources frees any Resources that are bound to terminated pods.
 func (m *ManagerImpl) UpdateAllocatedResources() {
 	activePods := m.activePods()
@@ -824,7 +578,7 @@ func (m *ManagerImpl) UpdateAllocatedResources() {
 	for _, podUID := range podsToBeRemovedList {
 
 		allSuccess := true
-		for resourceName, eI := range m.endpoints {
+		for resourceName, eI := range m.Endpoints {
 			if eI.e.isStopped() {
 				klog.Warningf("[qosresourcemanager] skip removePods: %+v of resource: %s, because plugin stopped", podsToBeRemovedList, resourceName)
 				continue
@@ -926,7 +680,7 @@ func (m *ManagerImpl) GetResourceRunContainerOptions(pod *v1.Pod, container *v1.
 // with PreStartRequired option set.
 func (m *ManagerImpl) callPreStartContainerIfNeeded(pod *v1.Pod, container *v1.Container, resource string) error {
 	m.mutex.Lock()
-	eI, ok := m.endpoints[resource]
+	eI, ok := m.Endpoints[resource]
 	if !ok {
 		m.mutex.Unlock()
 		return fmt.Errorf("endpoint not found in cache for a registered resource: %s", resource)
@@ -981,7 +735,7 @@ func (m *ManagerImpl) sanitizeNodeAllocatable(node *schedulerframework.NodeInfo)
 
 func (m *ManagerImpl) isResourcePluginResource(resource string) bool {
 	m.mutex.Lock()
-	_, registeredResource := m.endpoints[resource]
+	_, registeredResource := m.Endpoints[resource]
 	m.mutex.Unlock()
 
 	if registeredResource {
@@ -1019,7 +773,7 @@ func (m *ManagerImpl) reconcileState() {
 
 	m.mutex.Lock()
 
-	for resourceName, eI := range m.endpoints {
+	for resourceName, eI := range m.Endpoints {
 		if eI.e.isStopped() {
 			klog.Warningf("[qosresourcemanager.reconcileState] skip getResourceAllocation of resource: %s, because plugin stopped", resourceName)
 			continue
